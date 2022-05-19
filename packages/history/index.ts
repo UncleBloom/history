@@ -586,9 +586,15 @@ export type HashHistoryOptions = { window?: Window };
 export function createHashHistory(
   options: HashHistoryOptions = {}
 ): HashHistory {
+
+  // window 默认为 document.defaultView
   let { window = document.defaultView! } = options;
   let globalHistory = window.history;
 
+  /**
+   * 获取 index 和 location
+   * @returns [index:在历史栈中的第几个,location]
+   */
   function getIndexAndLocation(): [number, Location] {
     let {
       pathname = "/",
@@ -693,6 +699,7 @@ export function createHashHistory(
     return getBaseHref() + "#" + (typeof to === "string" ? to : createPath(to));
   }
 
+  // 把传入的 location 解析为 Location 对象（push 和 replace 时）
   function getNextLocation(to: To, state: any = null): Location {
     return readOnly<Location>({
       pathname: location.pathname,
@@ -718,21 +725,32 @@ export function createHashHistory(
     ];
   }
 
+  // 判断是否允许跳转
   function allowTx(action: Action, location: Location, retry: () => void) {
     return (
+      // 如果没有注册函数则直接判定 true
+      // 如果有注册函数，则依次调用注册函数并判定 false
       !blockers.length || (blockers.call({ action, location, retry }), false)
     );
   }
 
+  // 在执行跳转时执行 listeners 中注册的回调函数
   function applyTx(nextAction: Action) {
     action = nextAction;
     [index, location] = getIndexAndLocation();
     listeners.call({ action, location });
   }
 
+  /**
+   * 把新的历史条目添加到历史栈上
+   * @param to 
+   * @param state 
+   */
   function push(to: To, state?: any) {
     let nextAction = Action.Push;
+    // 生成下一个 Location
     let nextLocation = getNextLocation(to, state);
+    // 用于重试
     function retry() {
       push(to, state);
     }
@@ -744,23 +762,35 @@ export function createHashHistory(
       )})`
     );
 
+    // 与 history.block 相关
     if (allowTx(nextAction, nextLocation, retry)) {
+      // 根据新的 Location 生成新的 historyState 和 url
       let [historyState, url] = getHistoryStateAndUrl(nextLocation, index + 1);
 
       // TODO: Support forced reloading
+      // 官方注释：用 try...catch 包裹是因为 IOS 中限制 pushState 的调用次数为 100 次
       // try...catch because iOS limits us to 100 pushState calls :/
       try {
         globalHistory.pushState(historyState, "", url);
       } catch (error) {
+        // 刷新页面，等于 window.location.href = url
+        // 官方注释：这样会失去 state，但是没有有效的方法警告他们，因为页面会刷新
         // They are going to lose state here, but there is no real
         // way to warn them about it since the page will refresh...
         window.location.assign(url);
       }
 
+      // 执行 listeners 中注册的回调函数
       applyTx(nextAction);
     }
   }
 
+  /**
+   * 讲当前历史栈中的历史条目替换成新的历史条目
+   * 与 push 基本相同，仅仅是 index 不自增、调用了不同的 windows.history 的原生 API
+   * @param to 
+   * @param state 
+   */
   function replace(to: To, state?: any) {
     let nextAction = Action.Replace;
     let nextLocation = getNextLocation(to, state);
@@ -809,16 +839,35 @@ export function createHashHistory(
     listen(listener) {
       return listeners.push(listener);
     },
-    block(blocker) {
+    /**
+     * 向 blockers 注册一个回调函数
+     * 官方文档：Prevents changes to the history stack from happening. This is useful
+     *  when you want to prevent the user navigating away from the current page,
+     *  for example when they have some unsaved data on the current page.
+     * @param blocker {(tx: Transition): void}
+     * @returns 
+     */
+    block(blocker:Blocker) {
+      // 向 blockers 注册一个回调函数
       let unblock = blockers.push(blocker);
+
+      // 如果 blockers 中有注册的回调函数，就阻止默认操作。
+      /**
+       * 监听'beforeunload'事件（在浏览器关闭或刷新页面时触发）并且调用 
+       *  event.preventDefault() 会弹出弹窗,而且这个阻塞事件是不可以自定义的
+       *  也就是说，传入的形参 blocker 对于阻塞交互没有影响，只会影响
+       *  push, replace, go 这些 history 库中用于改变当前路由的 API。
+       */
 
       if (blockers.length === 1) {
         window.addEventListener(BeforeUnloadEventType, promptBeforeUnload);
       }
 
       return function () {
+        // 移除事件监听
         unblock();
-
+        
+        // 官方注释：移除 beforeunload 事件监听，可以让页面文档 document 在 pagehide 事件中是可以会回收的
         // Remove the beforeunload listener so the document may
         // still be salvageable in the pagehide event.
         // See https://html.spec.whatwg.org/#unloading-documents
@@ -1021,6 +1070,7 @@ type Events<F> = {
   call: (arg: any) => void;
 };
 
+// 创建一个基于观察者模式的 事件发布者
 function createEvents<F extends Function>(): Events<F> {
   let handlers: F[] = [];
 
@@ -1028,12 +1078,14 @@ function createEvents<F extends Function>(): Events<F> {
     get length() {
       return handlers.length;
     },
+    // 用于注册订阅的函数，返回一个取消订阅的函数
     push(fn: F) {
       handlers.push(fn);
       return function () {
         handlers = handlers.filter((handler) => handler !== fn);
       };
     },
+    // 触发事件（调用所有注册的方法）
     call(arg) {
       handlers.forEach((fn) => fn && fn(arg));
     },
